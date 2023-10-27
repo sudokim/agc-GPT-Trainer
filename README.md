@@ -4,22 +4,18 @@
 
 ## 사용 가능한 모델
 
-|                       모델명                        |  Parameter  |       모델 경로       |            토크나이저 경로            |
-|:------------------------------------------------:|:-----------:|:-----------------:|:------------------------------:|
-|  [pko-t5](https://github.com/paust-team/pko-t5)  | Base (275M) | paust/pko-t5-base |       paust/pko-t5-base        |
-| [koT5](https://github.com/wisenut-research/KoT5) | Base (222M) |    다운로드한 모델 경로    | 다운로드한 모델 경로의 `spiece.model` 파일 |
-
-pko-t5 모델은 별도 다운로드가 필요하지 않으며, Huggingface의 `from_pretrained()` 함수를 통해 사용할 수 있습니다.
-
-koT5 모델은 해당 repository의 `README.md`를 참고하여 다운로드할 수 있습니다.
+|                                              모델명                                              | Parameter |        비고         |
+|:---------------------------------------------------------------------------------------------:|:---------:|:-----------------:|
+|      [EleutherAI/polyglot-ko-12.8b](https://huggingface.co/EleutherAI/polyglot-ko-12.8b)      |   12.8b   |                   |
+| [nlpai-lab/kullm-polyglot-12.8b-v2](https://huggingface.co/nlpai-lab/kullm-polyglot-12.8b-v2) |   12.8b   | Instruction-tuned |
 
 ## 실행 방법
 
 ### 1. 가상 환경 생성
 
 ```bash
-conda create -n doct5query python=3.10.11
-conda activate doct5query
+conda create -n agc-gpt-trainer python=3.10
+conda activate agc-gpt-trainer
 conda install pytorch~=2.0.0 pytorch-cuda=11.8 -c pytorch -c nvidia
 pip3 install -r requirements.txt
 ```
@@ -50,84 +46,16 @@ python train.py \
 모델을 사용하고자 할 때, `huggingface`를 사용하여 모델을 불러오는 방법은 다음과 같습니다.
 
 ```python
-from transformers import T5ForConditionalGeneration, T5TokenizerFast
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model = T5ForConditionalGeneration.from_pretrained('output/{고유 식별자}')
-tokenizer = T5TokenizerFast.from_pretrained('output/{고유 식별자}', model_max_length=512)  # koT5 모델인 경우
+model = AutoModelForCausalLM.from_pretrained('output/{고유 식별자}')
+tokenizer = AutoTokenizer.from_pretrained('output/{고유 식별자}')
 ```
 
 #### 2.2. 추론
 
-추론 스크립트는 `predict.py`입니다. 다음과 같이 실행할 수 있습니다.
-
-```bash
-python predict.py --model_path /path/to/model \
-    --tokenizer_path /path/to/tokenizer \  # Huggingface 토크나이저 경로 (기본값: model_path)
-    --document_path /path/to/collections.tsv \
-    --batch_size 100 \
-    --output_path /path/to/output
-```
-
-추론은 3가지 방법으로 가능합니다.
-
-1. Greedy decoding: 확률이 가장 높은 질의 1개를 생성합니다.
-2. Beam search: beam search를 사용하여 여러 개의 질의를 생성합니다.
-3. Top-k sampling: 확률이 높은 k개의 토큰을 샘플링하여 질의를 생성합니다.
-
-docT5query의 경우, top-k sampling을 사용하는 것이 가장 좋은 성능을 보입니다.
-
-추론 결과는 `output_path`에 저장됩니다. (기본값은 `document_path`와 동일)
-다음 2가지 파일이 생성됩니다.
-
-1. `generated_queries.json`: 각 docid마다 생성된 질의를 저장합니다.
-2. `collection_expanded.tsv`: `collections.tsv`에 생성된 질의를 추가하여 저장합니다.
+추론 스크립트는 구현할 예정입니다.
 
 ## 데이터 형식
 
-### 1. 문서 (collections)
-
-`collection.tsv`
-
-```text
-docid||text
-docid||text
-...
-```
-
-### 2. 질의 (queries)
-
-`questions.tsv`
-
-```text
-qid\tquery
-qid\tquery
-...
-```
-
-### 3. Qrel (qrels)
-
-`qrels.tsv`
-
-```text
-qid\tdocid
-qid\tdocid
-...
-```
-
-### 4. 생성 결과 (`generated_queries.json`)
-
-```json5
-{
-    "docid1": [
-        "query1",
-        "query2",
-        // ...
-    ],
-    "docid2": [
-        "query1",
-        "query2",
-        // ...
-    ],
-    // ...
-}
-```
+데이터 형식은 [data의 README](data/README.md)를 참고해주세요.
