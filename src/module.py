@@ -5,9 +5,9 @@ from transformers import AutoModelForCausalLM
 
 
 class GPTModule(LightningModule):
-    def __init__(self, model_path: str, lr: float):
+    def __init__(self, model_path: str, lr: float, **kwargs):
         super().__init__()
-        self.model = AutoModelForCausalLM.from_pretrained(model_path)
+        self.model = AutoModelForCausalLM.from_pretrained(model_path, **kwargs)
         self.lr = lr
 
     def configure_optimizers(self):

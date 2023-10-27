@@ -1,4 +1,0 @@
-DOCUMENT: str
-DOCID: str
-QUESTION: str
-ANSWER: str

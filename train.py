@@ -1,5 +1,4 @@
 import logging
-import os
 from argparse import ArgumentParser, Namespace
 from datetime import datetime
 from pathlib import Path
@@ -11,15 +10,14 @@ from pytorch_lightning.callbacks import (
     EarlyStopping,
     ModelCheckpoint,
     RichModelSummary,
-    RichProgressBar,
 )
 from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.loggers.wandb import WandbLogger
 from rich.logging import RichHandler
-from transformers import T5Tokenizer, T5TokenizerFast
+from transformers import PreTrainedTokenizerFast
 from wonderwords import RandomWord
 
-from src.datamodule import GPTFineTuningDataModule
+from src.datamodule import GPTDataModule
 from src.module import GPTModule
 
 
@@ -46,11 +44,14 @@ def _parse_args() -> Namespace:
         type=str,
         default=None,
         help="Huggingface tokenizer path. Can be a directory (/path/to/tokenizer/dir), "
-             "or Huggingface model name (t5-base)",
+        "or Huggingface model name (t5-base)",
     )
 
     seeds = parser.add_argument_group("seeds", "Seeds for reproducibility")
     seeds.add_argument("--seed", type=int, default=42, help="Seed for random number generators")
+
+    model = parser.add_argument_group("model", "Model arguments")
+    model.add_argument("--model_max_length", type=int, default=1024, help="Maximum length of the model input")
 
     trainer = parser.add_argument_group("trainer", "Trainer arguments")
     trainer.add_argument("--batch_size", type=int, default=16, help="Batch size")
@@ -107,7 +108,7 @@ def _parse_args() -> Namespace:
     )
 
     logger = parser.add_argument_group("logger", "Logger arguments")
-    logger.add_argument("--project_name", type=str, default="kodocT5query", help="Project name. Used for logging")
+    logger.add_argument("--project_name", type=str, default="agc-GPT-Trainer", help="Project name. Used for logging")
     logger.add_argument("--use_wandb", action="store_true", help="Whether to use wandb")
     logger.add_argument("--wandb_entity", type=str, default="kocohub", help="WandB entity name")
     logger.add_argument("--wandb_tags", type=str, nargs="+", default=None, help="WandB tags")
@@ -135,6 +136,7 @@ def train(
     max_steps: int,
     devices: int,
     lr: float,
+    model_max_length: int,
     val_check_interval: int | float,
     accumulate_grad_batches: int,
     *args,
@@ -198,28 +200,34 @@ def train(
     python_logger.info(f"Model will be saved to {save_pretrained_path.absolute()}")
 
     # Load tokenizer
-    if use_fast_tokenizer:
-        python_logger.info("Using fast tokenizer")
-        tokenizer_cls = T5TokenizerFast
-        os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    else:
-        python_logger.info("Using Python tokenizer")
-        tokenizer_cls = T5Tokenizer
-    tokenizer = tokenizer_cls.from_pretrained(tokenizer_path, model_max_length=512)
-    python_logger.info(f"Using tokenizer {tokenizer_cls.__name__}")
+    python_logger.info("Loading tokenizer")
+    # tokenizer_cls = AutoTokenizer
+    tokenizer_cls = PreTrainedTokenizerFast
+    tokenizer = tokenizer_cls.from_pretrained(
+        tokenizer_path,
+        model_max_length=model_max_length,
+        bos_token="</s>",
+        eos_token="</s>",
+        unk_token="<unk>",
+        pad_token="<pad>",
+        mask_token="<mask>",
+    )
+    python_logger.info(f"Using tokenizer class {tokenizer.__class__.__name__}")
 
     # Load model and datamodule
-    python_logger.info(f"Loading model from {model_path}")
-    module = GPTModule(
-        model_path=model_path,
-        lr=lr,
-    )
     python_logger.info(f"Loading {len(dataset_paths)} datasets from {dataset_paths}")
-    datamodule = GPTFineTuningDataModule(
+    datamodule = GPTDataModule(
         dataset_paths=dataset_paths,
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_workers=num_workers,
+    )
+
+    python_logger.info(f"Loading model from {model_path}")
+    module = GPTModule(
+        model_path=model_path,
+        lr=lr,
+        # device_map="auto",
     )
 
     # Setup trainer
@@ -227,19 +235,19 @@ def train(
     callbacks = [
         ModelCheckpoint(
             dirpath=save_pretrained_path,
-            monitor="val_loss",
+            monitor="val/loss",
             mode="min",
             save_top_k=1,
-            filename="{epoch}-{val_loss:.2f}",
+            filename="epoch_{epoch}-loss_{val/loss:.2f}",
+            auto_insert_metric_name=False,
         ),
         RichModelSummary(max_depth=2),
-        RichProgressBar(),
     ]
     if early_stopping_patience is not None:
         python_logger.info(f"Using early stopping with patience {early_stopping_patience}")
         callbacks.append(
             EarlyStopping(
-                monitor="val_loss",
+                monitor="val/loss",
                 mode="min",
                 patience=5,
             ),

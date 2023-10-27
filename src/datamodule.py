@@ -1,12 +1,13 @@
 import json
 from logging import getLogger
 from pathlib import Path
+from typing import Any
 
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from src.typings import *
+from src.utils import FinetuningCollator
 
 logger = getLogger(__name__)
 
@@ -14,32 +15,24 @@ logger = getLogger(__name__)
 class GPTFineTuningDataset(Dataset):
     def __init__(
         self,
-        docid_to_doc: dict[DOCID, DOCUMENT],
-        data: list[tuple[QUESTION, list[DOCID], ANSWER]],
-        prompt: str,
-        document_sep: str = "\n\n",
-        return_labels: bool = True,
+        docid_to_doc: dict[str, str],  # (doc_id, document)
+        data: list[tuple[str, list[str], str]],
+        # (question, list of candidate doc ids, answer)
     ):
         """
         Dataset for fine-tuning GPT
 
         Args:
-            docid_to_doc (dict[DOCID, DOCUMENT]): Mapping from doc id to document
-            data (list[tuple[QUESTION, list[DOCID], ANSWER]]): List of (question, list of candidate doc ids, answer) tuples
-            prompt (str): Prompt to use for the question. The prompt should contain {question} and {document} placeholders.
-            document_sep (str, optional): Separator between documents. Defaults to "\\n\\n".
-            return_labels (bool, optional): Whether to return labels (answer). Defaults to True.
+            docid_to_doc (dict[str, str]): Dict of (doc id, document) pairs
+            data (list[tuple[str, list[str], str]]): List of (question, list of candidate doc ids, answer)
         """
         self.docid_to_doc = docid_to_doc
         self.data = data
-        self.prompt = prompt
-        self.document_sep = document_sep
-        self.return_labels = return_labels
 
     def __len__(self):
         return len(self.data)
 
-    def __getitem__(self, idx: int) -> tuple[str, str] | str:
+    def __getitem__(self, idx: int) -> tuple[str, list[str], str]:
         """
         Get a single item from the dataset
 
@@ -47,27 +40,65 @@ class GPTFineTuningDataset(Dataset):
             idx (int): Index of the item to get
 
         Returns:
-            Prompt and label if `return_labels` is True, prompt otherwise
+
         """
         question, doc_ids, answer = self.data[idx]
 
-        documents = self.document_sep.join([self.docid_to_doc[doc_id] for doc_id in doc_ids])
-        prompt = self.prompt.format(question=question, document=documents)
+        # Substitute doc_ids with documents
+        documents = [self.docid_to_doc[doc_id] for doc_id in doc_ids]
 
-        if self.return_labels:
-            return prompt, answer
-        else:
-            return prompt
+        return question, documents, answer
 
 
-class GPTFineTuningDataModule(LightningDataModule):
+class GPTPredictDataset(Dataset):
+    def __init__(
+        self,
+        docid_to_doc: dict[str, str],  # (doc_id, document)
+        data: list[tuple[str, list[str]]],
+        # (question, list of candidate doc ids, answer)
+    ):
+        """
+        Dataset for fine-tuning GPT
+
+        Args:
+            docid_to_doc (dict[str, str]): Dict of (doc id, document) pairs
+            data (list[tuple[str, list[str], str]]): List of (question, list of candidate doc ids) pairs
+        """
+        self.docid_to_doc = docid_to_doc
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> tuple[str, list[str]]:
+        """
+        Get a single item from the dataset
+
+        Args:
+            idx (int): Index of the item to get
+
+        Returns:
+
+        """
+        question, doc_ids = self.data[idx]
+
+        # Substitute doc_ids with documents
+        documents = [self.docid_to_doc[doc_id] for doc_id in doc_ids]
+
+        return question, documents
+
+
+class GPTDataModule(LightningDataModule):
+    DOCID_PARAGRAPHID_DELIMITER = "|"
+
     def __init__(
         self,
         dataset_paths: list[str],
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
         batch_size: int,
         num_workers: int = 4,
-        prompt: str = "질문: {question}\n\n\n문서: {document}\n\n\n답변:",
+        prompt_template_input: str | None = None,
+        prompt_template_target: str | None = None,
     ):
         """
         DataModule for the DocT5QueryModule
@@ -78,15 +109,18 @@ class GPTFineTuningDataModule(LightningDataModule):
             tokenizer (PreTrainedTokenizer | PreTrainedTokenizerFast): Tokenizer to use
             batch_size (int): Batch size
             num_workers (int, optional): Number of workers for the DataLoader. Defaults to 4.
-            prompt: Prompt to use for the question. The prompt should contain {question} and {document} placeholders.
-                If None, the default prompt will be used.
+            prompt_template_input: Prompt to use for the question. The prompt should contain
+                {question} and {document} placeholders. Defaults to None (use the default prompt).
+            prompt_template_target: Prompt to use for the answer. The prompt should contain {answer} placeholder.
+                Defaults to None (use the default prompt).
         """
         super().__init__()
 
-        self.docid_to_doc: dict[DOCID, DOCUMENT] = {}
-        self.train_dataset: list[tuple[QUESTION, list[DOCID], ANSWER]] = []
-        self.dev_dataset: list[tuple[QUESTION, list[DOCID], ANSWER]] = []
-        self.test_dataset: list[tuple[QUESTION, list[DOCID], ANSWER]] = []
+        self.raw_docs: list[dict[str, Any]] = []  # [{doc_id: document, ...}, ...]
+        self.docid_to_doc: dict[str, str] = {}  # {doc_id + paragraph_id: document, ...}
+        self.train_dataset: list[tuple[str, list[str], str]] = []  # (question, list of candidate doc ids, answer)
+        self.dev_dataset: list[tuple[str, list[str], str]] = []
+        self.test_dataset: list[tuple[str, list[str], str]] = []
 
         for dataset_path in dataset_paths:
             self._process_data(dataset_path)
@@ -94,7 +128,37 @@ class GPTFineTuningDataModule(LightningDataModule):
         self.tokenizer = tokenizer
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.prompt = prompt
+
+        if prompt_template_input is None:
+            prompt_template_input = "주어진 문서의 내용을 참고하여 질문에 답하시오.<|sep|>" "질문: {question}<|sep|>문서: {document}<|sep|>답변:"
+        if prompt_template_target is None:
+            prompt_template_target = "{answer}<|endoftext|>"
+
+        if prompt_template_input.count("{question}") != 1:
+            raise ValueError("prompt_input should contain one {question} placeholder")
+        if prompt_template_input.count("{document}") != 1:
+            raise ValueError("prompt_input should contain one {document} placeholder")
+
+        if prompt_template_target.count("{answer}") != 1:
+            raise ValueError("prompt_target should contain one {answer} placeholder")
+
+        self.prompt_template_input = prompt_template_input
+        self.prompt_template_target = prompt_template_target
+
+        self.collator_with_labels = FinetuningCollator(
+            tokenizer=self.tokenizer,
+            prompt_template_input=self.prompt_template_input,
+            prompt_template_output=self.prompt_template_target,
+        )
+
+        # Used for prediction dataset
+        # self.collator_without_labels = PromptCollator(
+        #     tokenizer=self.tokenizer,
+        #     return_labels=False,
+        #     prompt_input=self.prompt_input,
+        #     document_max_length=1024,
+        #     query_max_length=128,
+        # )
 
     def _process_data(self, dataset_path: str | Path):
         logger.info(f"Processing data from {dataset_path}")
@@ -108,30 +172,46 @@ class GPTFineTuningDataModule(LightningDataModule):
                 logger.warning(f"Skipping {document_path} as it is not a json file")
                 continue
 
-            with open(document_path, "r") as f:
+            with open(document_path, "r", encoding="utf-8") as f:
                 document = json.load(f)
 
             if not isinstance(document, dict):
                 raise ValueError(f"Document {document_path} is not a dict")
 
-            self.docid_to_doc.update(document)
+            self.raw_docs.append(document)
+
+            docid = document["docid"]
+            for paragraph_id, paragraph in document["content"].items():
+                final_id = f"{docid}{self.DOCID_PARAGRAPHID_DELIMITER}{paragraph_id}"
+                assert final_id not in self.docid_to_doc, f"Duplicate doc id {final_id}"
+
+                self.docid_to_doc[final_id] = paragraph["text"]
 
         # Load train/dev/test data
-        for split in ["train", "dev", "test"]:
-            with open(dataset_path / f"{split}.json", "r") as f:
+        def _process_split(split_: str) -> list[tuple[str, list[str], str]]:
+            result = []
+
+            with open(dataset_path / f"{split_}.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
 
             if not isinstance(data, list):
-                raise ValueError(f"Data in {dataset_path / f'{split}.json'} is not a list")
+                raise ValueError(f"Data in {dataset_path / f'{split_}.json'} is not a list")
 
             for item in data:
                 if not isinstance(item, dict):
-                    raise ValueError(f"Item {item} in {dataset_path / f'{split}.json'} is not a dict")
+                    raise ValueError(f"Item {item} in {dataset_path / f'{split_}.json'} is not a dict")
 
                 if item.keys() - {"question", "document", "answer"}:
-                    raise ValueError(f"Item {item} in {dataset_path / f'{split}.json'} has invalid keys")
+                    raise ValueError(f"Item {item} in {dataset_path / f'{split_}.json'} has invalid keys")
 
-                self.train_dataset.append((item["question"], item["document"], item["answer"]))
+                result.append((item["question"], item["document"], item["answer"]))
+
+            return result
+
+        for split, dataset in zip(
+            ["train", "dev", "test"], [self.train_dataset, self.dev_dataset, self.test_dataset]
+        ):
+            dataset.extend(_process_split(split))
 
     def train_dataloader(self):
         logger.info("Creating train dataloader")
@@ -139,11 +219,11 @@ class GPTFineTuningDataModule(LightningDataModule):
             GPTFineTuningDataset(
                 docid_to_doc=self.docid_to_doc,
                 data=self.train_dataset,
-                prompt=self.prompt,
             ),
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             shuffle=True,
+            collate_fn=self.collator_with_labels,
         )
 
     def val_dataloader(self):
@@ -152,10 +232,10 @@ class GPTFineTuningDataModule(LightningDataModule):
             GPTFineTuningDataset(
                 docid_to_doc=self.docid_to_doc,
                 data=self.dev_dataset,
-                prompt=self.prompt,
             ),
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            collate_fn=self.collator_with_labels,
         )
 
     def test_dataloader(self):
@@ -164,8 +244,8 @@ class GPTFineTuningDataModule(LightningDataModule):
             GPTFineTuningDataset(
                 docid_to_doc=self.docid_to_doc,
                 data=self.test_dataset,
-                prompt=self.prompt,
             ),
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            collate_fn=self.collator_with_labels,
         )
