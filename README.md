@@ -33,8 +33,8 @@ python train.py \
     --tokenizer_path /path/to/tokenizer \  # Huggingface 토크나이저 경로 (기본값: model_path)
     --batch_size 32 \
     --max_steps -1 \  # 최대 학습 step (기본값: -1 (무한, EarlyStopping 사용))
-    --val_check_interval 5000 \  # 해당 step마다 검증
-    --accumulate_grad_batches 4 \  # 그래디언트 누적
+    --eval_steps 5000 \  # 해당 step마다 검증
+    --gradient_accumulation_steps 4 \  # 그래디언트 누적
     --devices 1 \  # 사용할 GPU 개수
     --lr 1e-4
 ```
