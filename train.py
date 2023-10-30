@@ -1,24 +1,22 @@
 import logging
+import os
 from argparse import ArgumentParser, Namespace
-from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 import torch
-from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.callbacks import (
-    EarlyStopping,
-    ModelCheckpoint,
-    RichModelSummary,
-)
-from pytorch_lightning.loggers import CSVLogger
-from pytorch_lightning.loggers.wandb import WandbLogger
+import wandb
 from rich.logging import RichHandler
-from transformers import PreTrainedTokenizerFast
+from transformers import (
+    PreTrainedTokenizerFast,
+    Trainer,
+    AutoModelForCausalLM,
+    TrainingArguments,
+    EarlyStoppingCallback,
+)
 from wonderwords import RandomWord
 
-from src.datamodule import GPTDataModule
-from src.module import GPTModule
+from src.datamodule import GPTDataset
 
 
 def _parse_args() -> Namespace:
@@ -46,12 +44,18 @@ def _parse_args() -> Namespace:
         help="Huggingface tokenizer path. Can be a directory (/path/to/tokenizer/dir), "
         "or Huggingface model name (t5-base)",
     )
+    paths.add_argument(
+        "--output_path",
+        type=str,
+        default="output",
+        help="Base path to save model",
+    )
 
     seeds = parser.add_argument_group("seeds", "Seeds for reproducibility")
     seeds.add_argument("--seed", type=int, default=42, help="Seed for random number generators")
 
     model = parser.add_argument_group("model", "Model arguments")
-    model.add_argument("--model_max_length", type=int, default=1024, help="Maximum length of the model input")
+    model.add_argument("--model_max_length", type=int, default=2048, help="Maximum length of the model input")
 
     trainer = parser.add_argument_group("trainer", "Trainer arguments")
     trainer.add_argument("--batch_size", type=int, default=16, help="Batch size")
@@ -85,17 +89,17 @@ def _parse_args() -> Namespace:
         "--precision",
         type=str,
         default="32",
-        choices=["64", "32", "16-mixed", "bf16-mixed"],
-        help="Floating point precision (64, 32, 16, bf16)",
+        choices=["32", "tf32", "bf16", "fp16"],
+        help="Floating point precision (32, tf32, bf16, fp16)",
     )
     trainer.add_argument(
-        "--val_check_interval",
+        "--eval_steps",
         type=eval,
         default=1.0,
         help="Validation check interval. If int, check every n steps. If float, check every n percent of each epoch.",
     )
     trainer.add_argument(
-        "--accumulate_grad_batches",
+        "--gradient_accumulation_steps",
         type=int,
         default=1,
         help="Number of steps to accumulate gradients on before performing optimizer step",
@@ -103,8 +107,20 @@ def _parse_args() -> Namespace:
     trainer.add_argument(
         "--early_stopping_patience",
         type=int,
-        default=None,
+        default=5,
         help="Early stopping patience (epochs)",
+    )
+    trainer.add_argument(
+        "--lr_scheduler_type",
+        type=str,
+        default="linear",
+        help="Learning rate scheduler type",
+    )
+    trainer.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=0,
+        help="Number of steps for warmup",
     )
 
     logger = parser.add_argument_group("logger", "Logger arguments")
@@ -137,9 +153,13 @@ def train(
     devices: int,
     lr: float,
     model_max_length: int,
-    val_check_interval: int | float,
-    accumulate_grad_batches: int,
+    eval_steps: int | float,
+    gradient_accumulation_steps: int,
+    precision: str,
+    lr_scheduler_type: str,
+    warmup_steps: int,
     *args,
+    output_path: str = "output",
     use_fast_tokenizer: bool = False,
     project_name: str | None = "agc-GPT-finetuning",
     use_wandb: bool = False,
@@ -164,9 +184,13 @@ def train(
         max_steps: Max number of steps. -1 for no limit
         devices: Number of devices to train on (1 for single GPU)
         lr: Learning rate
-        val_check_interval: Validation check interval. If int, check every n steps.
+        model_max_length: Maximum length of the model input
+        eval_steps: Validation check interval. If int, check every n steps.
             If float, check every n percent of each epoch.
-        accumulate_grad_batches: Number of steps to accumulate gradients on before performing optimizer step
+        gradient_accumulation_steps: Number of steps to accumulate gradients on before performing optimizer step
+        precision: Floating point precision (32, bf16, fp16)
+        lr_scheduler_type: Learning rate scheduler type
+        output_path: Base path to save model
         use_fast_tokenizer: Whether to use fast tokenizer (T5TokenizerFast) or Python tokenizer (T5Tokenizer)
         project_name: Project name. Used for logging
         use_wandb: Whether to use wandb
@@ -180,24 +204,23 @@ def train(
         None
 
     """
-    torch.set_float32_matmul_precision("medium")
+    torch.set_float32_matmul_precision("high")
 
     if python_logger is None:
         python_logger = logging.getLogger(__name__)
 
-    python_logger.info("Starting training")
-    seed_everything(seed)
+    python_logger.info("=== Starting training ===")
 
     # Create a unique save path
     random_word_generator = RandomWord()
     while True:
         # Repeat until there is no directory with the same name
         random_word = random_word_generator.random_words(include_parts_of_speech=["nouns"])[0]
-        save_pretrained_path = Path("output") / random_word
-        if not save_pretrained_path.exists():
+        output_dir = Path(output_path) / random_word
+        if not output_dir.exists():
             break
-    save_pretrained_path.mkdir(parents=True)
-    python_logger.info(f"Model will be saved to {save_pretrained_path.absolute()}")
+    output_dir.mkdir(parents=True)
+    python_logger.info(f"Model will be saved to {output_dir.absolute()}")
 
     # Load tokenizer
     python_logger.info("Loading tokenizer")
@@ -206,17 +229,12 @@ def train(
     tokenizer = tokenizer_cls.from_pretrained(
         tokenizer_path,
         model_max_length=model_max_length,
-        bos_token="</s>",
-        eos_token="</s>",
-        unk_token="<unk>",
-        pad_token="<pad>",
-        mask_token="<mask>",
     )
     python_logger.info(f"Using tokenizer class {tokenizer.__class__.__name__}")
 
     # Load model and datamodule
     python_logger.info(f"Loading {len(dataset_paths)} datasets from {dataset_paths}")
-    datamodule = GPTDataModule(
+    dataset = GPTDataset(
         dataset_paths=dataset_paths,
         tokenizer=tokenizer,
         batch_size=batch_size,
@@ -224,106 +242,90 @@ def train(
     )
 
     python_logger.info(f"Loading model from {model_path}")
-    module = GPTModule(
-        model_path=model_path,
-        lr=lr,
-        # device_map="auto",
+    # model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    python_logger.info(f"Using optimizer {optimizer.__class__.__name__}")
+
+    python_logger.info("Loading TrainingArguments and Trainer")
+    training_arguments = TrainingArguments(
+        output_dir=output_dir,
+        do_train=True,
+        do_eval=True,
+        evaluation_strategy="steps",
+        eval_steps=eval_steps,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        learning_rate=lr,
+        max_steps=max_steps,
+        logging_strategy="steps",
+        logging_steps=1,
+        save_strategy="steps",
+        save_steps=eval_steps,
+        save_total_limit=3,
+        seed=seed,
+        data_seed=seed,
+        bf16=(precision == "bf16"),
+        fp16=(precision == "fp16"),
+        tf32=(precision == "tf32"),
+        load_best_model_at_end=True,
+        dataloader_num_workers=num_workers,
+        lr_scheduler_type=lr_scheduler_type,
+        warmup_steps=warmup_steps,
+    )
+    python_logger.info(f"Using TrainingArguments {training_arguments}")
+
+    if not use_wandb:
+        python_logger.info("WandB is disabled")
+        os.environ["WANDB_MODE"] = "disabled"
+    else:
+        python_logger.info("WandB is enabled")
+    wandb.init(
+        dir=output_dir,
+        project=project_name,
+        entity=wandb_entity,
+        tags=wandb_tags,
+        config={
+            "dataset_paths": dataset_paths,
+            "model_path": model_path,
+            "tokenizer_path": tokenizer_path,
+            "save_pretrained_path": output_dir.absolute(),
+            "accelerator": accelerator,
+            "strategy": strategy,
+            "devices": devices,
+            "seed": seed,
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "max_steps": max_steps,
+            "lr": lr,
+            "eval_steps": eval_steps,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "use_fast_tokenizer": use_fast_tokenizer,
+        },
     )
 
     # Setup trainer
-    python_logger.info("Loading callbacks")
-    callbacks = [
-        ModelCheckpoint(
-            dirpath=save_pretrained_path,
-            monitor="val/loss",
-            mode="min",
-            save_top_k=1,
-            filename="epoch_{epoch}-loss_{val/loss:.2f}",
-            auto_insert_metric_name=False,
-        ),
-        RichModelSummary(max_depth=2),
-    ]
-    if early_stopping_patience is not None:
-        python_logger.info(f"Using early stopping with patience {early_stopping_patience}")
-        callbacks.append(
-            EarlyStopping(
-                monitor="val/loss",
-                mode="min",
-                patience=5,
-            ),
-        )
-
-    python_logger.info("Loading loggers")
-    loggers = [CSVLogger(save_dir="logs", name=project_name)]
-    if use_wandb:
-        python_logger.info("Using wandb")
-        loggers.append(
-            WandbLogger(
-                project=project_name,
-                entity=wandb_entity,
-                name=f"{random_word}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
-                tags=wandb_tags,
-            ),
-        )
-
     trainer = Trainer(
-        enable_model_summary=False,
-        accelerator=accelerator,
-        devices=devices,
-        strategy=strategy,
-        # Step-based training
-        max_epochs=-1,
-        max_steps=max_steps,
-        val_check_interval=val_check_interval,
-        check_val_every_n_epoch=None,
-        # Gradient accumulation
-        accumulate_grad_batches=accumulate_grad_batches,
-        callbacks=callbacks,
-        logger=loggers,
+        model=model,
+        args=training_arguments,
+        data_collator=dataset.collator_with_labels,
+        train_dataset=dataset.train_dataset,
+        eval_dataset=dataset.dev_dataset,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)],
     )
-
-    for pl_logger in loggers:
-        pl_logger.log_hyperparams(
-            {
-                "dataset_paths": dataset_paths,
-                "model_path": model_path,
-                "tokenizer_path": tokenizer_path,
-                "save_pretrained_path": save_pretrained_path.absolute(),
-                "accelerator": accelerator,
-                "strategy": strategy,
-                "devices": devices,
-                "seed": seed,
-                "batch_size": batch_size,
-                "num_workers": num_workers,
-                "max_steps": max_steps,
-                "lr": lr,
-                "val_check_interval": val_check_interval,
-                "accumulate_grad_batches": accumulate_grad_batches,
-                "use_fast_tokenizer": use_fast_tokenizer,
-            },
-        )
 
     python_logger.info("Training started")
-    trainer.fit(module, datamodule=datamodule)
+    trainer.train()
 
     python_logger.info("Testing started")
-    try:
-        trainer.test(ckpt_path="best", datamodule=datamodule)
-    except ValueError:
-        python_logger.warning("No best checkpoint found. Using current model.")
-        trainer.test(module, datamodule=datamodule)
-
-    # noinspection PyUnresolvedReferences
-    python_logger.info(
-        f"Training finished.\n"
-        f"Best path: {trainer.checkpoint_callback.best_model_path}\n"
-        f"Best score: {trainer.checkpoint_callback.best_model_score:.4f}\n"
-    )
+    trainer.evaluate(eval_dataset=dataset.test_dataset)
 
     # Save model
-    python_logger.info(f"Saving model to {save_pretrained_path}")
-    module.model.save_pretrained(save_pretrained_path)
-    tokenizer.save_pretrained(save_pretrained_path)
+    python_logger.info(f"Saving model to {output_dir}")
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
 
 
 def _main():

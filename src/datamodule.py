@@ -3,7 +3,6 @@ from logging import getLogger
 from pathlib import Path
 from typing import Any
 
-from pytorch_lightning import LightningDataModule
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -88,7 +87,7 @@ class GPTPredictDataset(Dataset):
         return question, documents
 
 
-class GPTDataModule(LightningDataModule):
+class GPTDataset:
     DOCID_PARAGRAPHID_DELIMITER = "|"
 
     def __init__(
@@ -118,9 +117,9 @@ class GPTDataModule(LightningDataModule):
 
         self.raw_docs: list[dict[str, Any]] = []  # [{doc_id: document, ...}, ...]
         self.docid_to_doc: dict[str, str] = {}  # {doc_id + paragraph_id: document, ...}
-        self.train_dataset: list[tuple[str, list[str], str]] = []  # (question, list of candidate doc ids, answer)
-        self.dev_dataset: list[tuple[str, list[str], str]] = []
-        self.test_dataset: list[tuple[str, list[str], str]] = []
+        self.train_dataset = []  # (question, list of candidate doc ids, answer)
+        self.dev_dataset =[]
+        self.test_dataset = []
 
         for dataset_path in dataset_paths:
             self._process_data(dataset_path)
@@ -159,6 +158,19 @@ class GPTDataModule(LightningDataModule):
         #     document_max_length=1024,
         #     query_max_length=128,
         # )
+
+        self.train_dataset = GPTFineTuningDataset(
+            docid_to_doc=self.docid_to_doc,
+            data=self.train_dataset,
+        )
+        self.dev_dataset = GPTFineTuningDataset(
+            docid_to_doc=self.docid_to_doc,
+            data=self.dev_dataset,
+        )
+        self.test_dataset = GPTFineTuningDataset(
+            docid_to_doc=self.docid_to_doc,
+            data=self.test_dataset,
+        )
 
     def _process_data(self, dataset_path: str | Path):
         logger.info(f"Processing data from {dataset_path}")
@@ -216,10 +228,7 @@ class GPTDataModule(LightningDataModule):
     def train_dataloader(self):
         logger.info("Creating train dataloader")
         return DataLoader(
-            GPTFineTuningDataset(
-                docid_to_doc=self.docid_to_doc,
-                data=self.train_dataset,
-            ),
+            self.train_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             shuffle=True,
@@ -229,10 +238,7 @@ class GPTDataModule(LightningDataModule):
     def val_dataloader(self):
         logger.info("Creating dev dataloader")
         return DataLoader(
-            GPTFineTuningDataset(
-                docid_to_doc=self.docid_to_doc,
-                data=self.dev_dataset,
-            ),
+            self.dev_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             collate_fn=self.collator_with_labels,
@@ -241,10 +247,7 @@ class GPTDataModule(LightningDataModule):
     def test_dataloader(self):
         logger.info("Creating test dataloader")
         return DataLoader(
-            GPTFineTuningDataset(
-                docid_to_doc=self.docid_to_doc,
-                data=self.test_dataset,
-            ),
+            self.test_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             collate_fn=self.collator_with_labels,
