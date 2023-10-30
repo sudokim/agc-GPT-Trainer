@@ -8,11 +8,11 @@ import torch
 import wandb
 from rich.logging import RichHandler
 from transformers import (
-    PreTrainedTokenizerFast,
     Trainer,
     AutoModelForCausalLM,
     TrainingArguments,
     EarlyStoppingCallback,
+    AutoTokenizer,
 )
 from wonderwords import RandomWord
 
@@ -122,6 +122,12 @@ def _parse_args() -> Namespace:
         default=0,
         help="Number of steps for warmup",
     )
+    trainer.add_argument(
+        "--test_with_small_model",
+        action="store_true",
+        help="Whether to test with a small model (skt/kogpt2-base-v2). "
+        "If True, model_path and tokenizer_path will be ignored",
+    )
 
     logger = parser.add_argument_group("logger", "Logger arguments")
     logger.add_argument("--project_name", type=str, default="agc-GPT-Trainer", help="Project name. Used for logging")
@@ -166,6 +172,7 @@ def train(
     wandb_entity: str | None = None,
     wandb_tags: list[str] | None = None,
     python_logger: logging.Logger | None = None,
+    test_with_small_model: bool = False,
     **kwargs,
 ):
     """
@@ -198,6 +205,7 @@ def train(
         wandb_entity: WandB entity name
         wandb_tags: WandB tags
         python_logger: Logger to use
+        test_with_small_model: Whether to test with a small model (skt/kogpt2-base-v2)
         *args: Additional args
         **kwargs: Additional kwargs
 
@@ -211,6 +219,8 @@ def train(
         python_logger = logging.getLogger(__name__)
 
     python_logger.info("=== Starting training ===")
+    if test_with_small_model:
+        python_logger.warning("Testing with a small model (skt/kogpt2-base-v2)")
 
     # Create a unique save path
     random_word_generator = RandomWord()
@@ -226,11 +236,21 @@ def train(
     # Load tokenizer
     python_logger.info("Loading tokenizer")
     # tokenizer_cls = AutoTokenizer
-    tokenizer_cls = PreTrainedTokenizerFast
-    tokenizer = tokenizer_cls.from_pretrained(
-        tokenizer_path,
-        model_max_length=model_max_length,
-    )
+    tokenizer_cls = AutoTokenizer
+    if test_with_small_model:
+        tokenizer = tokenizer_cls.from_pretrained(
+            "skt/kogpt2-base-v2",
+            bos_token="</s>",
+            eos_token="</s>",
+            unk_token="<unk>",
+            pad_token="<pad>",
+            mask_token="<mask>",
+        )
+    else:
+        tokenizer = tokenizer_cls.from_pretrained(
+            tokenizer_path,
+            model_max_length=model_max_length,
+        )
     python_logger.info(f"Using tokenizer class {tokenizer.__class__.__name__}")
 
     # Load model and datamodule
@@ -242,9 +262,12 @@ def train(
         num_workers=num_workers,
     )
 
-    python_logger.info(f"Loading model from {model_path}")
     # model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
-    model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+    if test_with_small_model:
+        model = AutoModelForCausalLM.from_pretrained("skt/kogpt2-base-v2")
+    else:
+        python_logger.info(f"Loading model from {model_path}")
+        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     python_logger.info(f"Using optimizer {optimizer.__class__.__name__}")

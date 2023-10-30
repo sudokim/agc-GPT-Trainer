@@ -89,7 +89,14 @@ class GPTPredictDataset(Dataset):
         question, doc_ids = self.data[idx]
 
         # Substitute doc_ids with documents
-        documents = [self.docid_to_doc[doc_id] for doc_id in doc_ids]
+        if isinstance(doc_ids, str):
+            # Document is directly given
+            documents = doc_ids
+        elif isinstance(doc_ids, list):
+            # List of docids is given
+            documents = [self.docid_to_doc[doc_id] for doc_id in doc_ids]
+        else:
+            raise ValueError(f"Invalid type for doc_ids: {type(doc_ids)}")
 
         return question, documents
 
@@ -224,8 +231,9 @@ class GPTDataset:
             if not isinstance(item, dict):
                 raise ValueError(f"Item {item} in {dataset_path / f'{split_}.json'} is not a dict")
 
-            if item.keys() - {"question", "document", "answer"}:
-                raise ValueError(f"Item {item} in {dataset_path / f'{split_}.json'} has invalid keys")
+            # assert {"question", "document", "answer"} in keys
+            if not {"question", "document", "answer"}.issubset(item.keys()):
+                raise ValueError(f"Item {item} in {dataset_path / f'{split_}.json'} does not contain all required keys")
 
             if not isinstance(item["question"], str):
                 raise ValueError(

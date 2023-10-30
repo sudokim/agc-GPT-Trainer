@@ -30,8 +30,7 @@ class FinetuningCollator:
         self.query_max_length = query_max_length
 
     def __call__(
-        self,
-        batch: list[list[str], list[list[str]], list[str]]  # (questions, documents, labels)
+        self, batch: list[list[str], list[list[str]], list[str]]  # (questions, documents, labels)
     ) -> BatchEncoding:
         """
         Tokenize and collate a batch of documents and queries
