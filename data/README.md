@@ -19,7 +19,8 @@ dataset
     {
         // 필수 attribute
         "question": "...",
-        "document": ["docid-paragraphid", "..."],
+        "document": ["docid|paragraphid", "..."],  // List of docid
+        // "document": "This is a sample document.",  // Document 직접 입력
         "answer": "...",
         // 추가 attribute
         "document_title": "...",

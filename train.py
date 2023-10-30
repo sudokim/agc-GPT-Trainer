@@ -190,6 +190,7 @@ def train(
         gradient_accumulation_steps: Number of steps to accumulate gradients on before performing optimizer step
         precision: Floating point precision (32, bf16, fp16)
         lr_scheduler_type: Learning rate scheduler type
+        warmup_steps: Number of steps for warmup
         output_path: Base path to save model
         use_fast_tokenizer: Whether to use fast tokenizer (T5TokenizerFast) or Python tokenizer (T5Tokenizer)
         project_name: Project name. Used for logging
@@ -277,11 +278,11 @@ def train(
     )
     python_logger.info(f"Using TrainingArguments {training_arguments}")
 
-    if not use_wandb:
+    if use_wandb:
+        python_logger.info("WandB is enabled")
+    else:
         python_logger.info("WandB is disabled")
         os.environ["WANDB_MODE"] = "disabled"
-    else:
-        python_logger.info("WandB is enabled")
     wandb.init(
         dir=output_dir,
         project=project_name,

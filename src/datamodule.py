@@ -44,7 +44,14 @@ class GPTFineTuningDataset(Dataset):
         question, doc_ids, answer = self.data[idx]
 
         # Substitute doc_ids with documents
-        documents = [self.docid_to_doc[doc_id] for doc_id in doc_ids]
+        if isinstance(doc_ids, str):
+            # Document is directly given
+            documents = doc_ids
+        elif isinstance(doc_ids, list):
+            # List of docids is given
+            documents = [self.docid_to_doc[doc_id] for doc_id in doc_ids]
+        else:
+            raise ValueError(f"Invalid type for doc_ids: {type(doc_ids)}")
 
         return question, documents, answer
 
@@ -118,7 +125,7 @@ class GPTDataset:
         self.raw_docs: list[dict[str, Any]] = []  # [{doc_id: document, ...}, ...]
         self.docid_to_doc: dict[str, str] = {}  # {doc_id + paragraph_id: document, ...}
         self.train_dataset = []  # (question, list of candidate doc ids, answer)
-        self.dev_dataset =[]
+        self.dev_dataset = []
         self.test_dataset = []
 
         for dataset_path in dataset_paths:
@@ -194,36 +201,51 @@ class GPTDataset:
 
             docid = document["docid"]
             for paragraph_id, paragraph in document["content"].items():
-                final_id = f"{docid}{self.DOCID_PARAGRAPHID_DELIMITER}{paragraph_id}"
+                final_id = docid + self.DOCID_PARAGRAPHID_DELIMITER + paragraph_id
                 assert final_id not in self.docid_to_doc, f"Duplicate doc id {final_id}"
 
                 self.docid_to_doc[final_id] = paragraph["text"]
 
         # Load train/dev/test data
-        def _process_split(split_: str) -> list[tuple[str, list[str], str]]:
-            result = []
+        for split, dataset in zip(["train", "dev", "test"], [self.train_dataset, self.dev_dataset, self.test_dataset]):
+            dataset.extend(self._process_split(dataset_path, split))
 
-            with open(dataset_path / f"{split_}.json", "r", encoding="utf-8") as f:
-                data = json.load(f)
+    @staticmethod
+    def _process_split(dataset_path: Path, split_: str) -> list[tuple[str, list[str] | str, str]]:
+        result = []
 
-            if not isinstance(data, list):
-                raise ValueError(f"Data in {dataset_path / f'{split_}.json'} is not a list")
+        with open(dataset_path / f"{split_}.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
 
-            for item in data:
-                if not isinstance(item, dict):
-                    raise ValueError(f"Item {item} in {dataset_path / f'{split_}.json'} is not a dict")
+        if not isinstance(data, list):
+            raise ValueError(f"Data in {dataset_path / f'{split_}.json'} is not a list")
 
-                if item.keys() - {"question", "document", "answer"}:
-                    raise ValueError(f"Item {item} in {dataset_path / f'{split_}.json'} has invalid keys")
+        for item in data:
+            if not isinstance(item, dict):
+                raise ValueError(f"Item {item} in {dataset_path / f'{split_}.json'} is not a dict")
 
-                result.append((item["question"], item["document"], item["answer"]))
+            if item.keys() - {"question", "document", "answer"}:
+                raise ValueError(f"Item {item} in {dataset_path / f'{split_}.json'} has invalid keys")
 
-            return result
+            if not isinstance(item["question"], str):
+                raise ValueError(
+                    f"Incorrect type for question in {item} in {dataset_path / f'{split_}.json'}; "
+                    f"expected str, got {type(item['question'])}"
+                )
+            if not isinstance(item["answer"], str):
+                raise ValueError(
+                    f"Incorrect type for answer in {item} in {dataset_path / f'{split_}.json'}; "
+                    f"expected str, got {type(item['answer'])}"
+                )
+            if not isinstance(item["document"], (str, list)):
+                raise ValueError(
+                    f"Incorrect type for document in {item} in {dataset_path / f'{split_}.json'}; "
+                    f"expected str or list[str], got {type(item['document'])}"
+                )
 
-        for split, dataset in zip(
-            ["train", "dev", "test"], [self.train_dataset, self.dev_dataset, self.test_dataset]
-        ):
-            dataset.extend(_process_split(split))
+            result.append((item["question"], item["document"], item["answer"]))
+
+        return result
 
     def train_dataloader(self):
         logger.info("Creating train dataloader")
