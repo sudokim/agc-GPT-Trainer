@@ -10,6 +10,7 @@ class FineTuningCollator:
         prompt_template_output: str,
         document_max_length: int = 1024 + 512,
         query_max_length: int = 512,
+        pad_to_multiple_of_8: bool = True,
     ):
         """
         Tokenize and collate a batch of questions, documents, and labels
@@ -28,6 +29,7 @@ class FineTuningCollator:
         self.prompt_template_output = prompt_template_output
         self.document_max_length = document_max_length
         self.query_max_length = query_max_length
+        self.pad_to_multiple_of_8 = pad_to_multiple_of_8
 
     def __call__(
         self, batch: list[list[str], list[list[str]], list[str]]  # (questions, documents, labels)
@@ -72,7 +74,7 @@ class FineTuningCollator:
             truncation=True,
             max_length=self.document_max_length,
             return_tensors="pt",
-            pad_to_multiple_of=8,
+            pad_to_multiple_of=8 if self.pad_to_multiple_of_8 else None,
         )
 
         # labels_mask: False: label, True: input/padding
@@ -142,7 +144,6 @@ class PromptCollator:
             truncation=True,
             max_length=self.document_max_length,
             return_tensors="pt",
-            pad_to_multiple_of=8,
         )
 
         del tokenized["token_type_ids"]

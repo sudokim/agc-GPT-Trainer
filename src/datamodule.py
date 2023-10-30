@@ -145,7 +145,7 @@ class GPTDataset:
         if prompt_template_input is None:
             prompt_template_input = "주어진 문서의 내용을 참고하여 질문에 답하시오.<|sep|>" "질문: {question}<|sep|>문서: {document}<|sep|>답변:"
         if prompt_template_target is None:
-            prompt_template_target = "{answer}<|endoftext|>"
+            prompt_template_target = " {answer}<|endoftext|>"
 
         if prompt_template_input.count("{question}") != 1:
             raise ValueError("prompt_input should contain one {question} placeholder")
@@ -278,4 +278,13 @@ class GPTDataset:
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             collate_fn=self.collator_with_labels,
+        )
+
+    def predict_dataloader(self):
+        logger.info("Creating predict dataloader")
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            collate_fn=self.collator_without_labels,
         )
