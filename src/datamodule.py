@@ -6,7 +6,7 @@ from typing import Any
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from src.utils import FinetuningCollator
+from src.utils import FineTuningCollator, PromptCollator
 
 logger = getLogger(__name__)
 
@@ -158,20 +158,17 @@ class GPTDataset:
         self.prompt_template_input = prompt_template_input
         self.prompt_template_target = prompt_template_target
 
-        self.collator_with_labels = FinetuningCollator(
+        self.collator_with_labels = FineTuningCollator(
             tokenizer=self.tokenizer,
             prompt_template_input=self.prompt_template_input,
             prompt_template_output=self.prompt_template_target,
         )
 
         # Used for prediction dataset
-        # self.collator_without_labels = PromptCollator(
-        #     tokenizer=self.tokenizer,
-        #     return_labels=False,
-        #     prompt_input=self.prompt_input,
-        #     document_max_length=1024,
-        #     query_max_length=128,
-        # )
+        self.collator_without_labels = PromptCollator(
+            tokenizer=self.tokenizer,
+            prompt_template_input=self.prompt_template_input,
+        )
 
         self.train_dataset = GPTFineTuningDataset(
             docid_to_doc=self.docid_to_doc,
