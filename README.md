@@ -16,7 +16,7 @@
 ```bash
 conda create -n agc-gpt-trainer python=3.10
 conda activate agc-gpt-trainer
-conda install pytorch~=2.0.0 pytorch-cuda=11.8 -c pytorch -c nvidia
+conda install pytorch=2.0.1 pytorch-cuda=11.7 -c pytorch -c nvidia
 pip3 install -r requirements.txt
 ```
 
