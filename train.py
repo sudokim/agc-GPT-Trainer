@@ -88,7 +88,7 @@ def _parse_args() -> Namespace:
         "--device_map",
         type=str,
         default="auto",
-        help="Number of devices to train on (1 for single GPU)",
+        help="Device map for model (auto, cpu, cuda:0, cuda:1, ...)",
     )
     trainer.add_argument(
         "--precision",
