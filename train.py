@@ -112,7 +112,7 @@ def _parse_args() -> Namespace:
     trainer.add_argument(
         "--early_stopping_patience",
         type=int,
-        default=5,
+        default=2,
         help="Early stopping patience (epochs)",
     )
     trainer.add_argument(
@@ -156,7 +156,7 @@ def _parse_args() -> Namespace:
     logger = parser.add_argument_group("logger", "Logger arguments")
     logger.add_argument("--project_name", type=str, default="agc-GPT-Trainer", help="Project name. Used for logging")
     logger.add_argument("--use_wandb", action="store_true", help="Whether to use wandb")
-    logger.add_argument("--wandb_entity", type=str, default="kocohub", help="WandB entity name")
+    logger.add_argument("--wandb_entity", type=str, default=None, help="WandB entity name")
     logger.add_argument("--wandb_tags", type=str, nargs="+", default=None, help="WandB tags")
 
     parsed = parser.parse_args()

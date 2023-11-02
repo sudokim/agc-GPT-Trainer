@@ -21,6 +21,12 @@ def _parse_args() -> Namespace:
     paths = parser.add_argument_group("paths", "Paths to data and model")
     # Multiple paths accepted
     paths.add_argument(
+        "--prediction_path",
+        type=str,
+        required=True,
+        help="Path to prediction file",
+    )
+    paths.add_argument(
         "--dataset_paths",
         type=str,
         nargs="+",
@@ -65,6 +71,16 @@ def _parse_args() -> Namespace:
         help="Whether to test with a small model (skt/kogpt2-base-v2). "
         "If True, model_path and tokenizer_path will be ignored",
     )
+    trainer.add_argument(
+        "--llama_length",
+        action="store_true",
+        help="Allow more tokens for LLAMA",
+    )
+    trainer.add_argument(
+        "--kullm_template",
+        action="store_true",
+        help="Use KULLM template",
+    )
 
     peft = parser.add_argument_group("peft", "Parameter-efficient fine-tuning arguments")
     peft.add_argument("--load_in_8bit", action="store_true", help="Whether to load model in 8bit training mode")
@@ -80,18 +96,20 @@ def _parse_args() -> Namespace:
 
 
 def generate(model, tokenizer, batch, skip_special_tokens: bool = True, **kwargs) -> list[str]:
-    # tokenized = tokenizer(batch, return_tensors="pt", padding=True, truncation=True).to(model.device)
-    # del tokenized["token_type_ids"]
-    #
     # Generate
     batch = batch.to(model.device)
-    output = model.generate(
-        **batch,
+
+    generate_params = dict(
         do_sample=True,
         max_new_tokens=512,
         temperature=0.5,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
+    ) | kwargs
+
+    output = model.generate(
+        **batch,
+        **generate_params,
     )
 
     # Decode
@@ -102,7 +120,8 @@ def generate(model, tokenizer, batch, skip_special_tokens: bool = True, **kwargs
 
 # noinspection PyUnusedLocal
 @torch.no_grad()
-def train(
+def predict(
+    prediction_path: str,
     dataset_paths: list[str],
     model_path: str,  # HuggingFace model path
     tokenizer_path: str,  # HuggingFace tokenizer path
@@ -116,6 +135,8 @@ def train(
     *args,
     python_logger: logging.Logger | None = None,
     test_with_small_model: bool = False,
+    llama_length: bool = False,  # Allow more tokens for LLAMA
+    kullm_template: bool = False,
     **kwargs,
 ):
     if lora and adapter_weight_path is None:
@@ -127,6 +148,7 @@ def train(
 
     if python_logger is None:
         python_logger = logging.getLogger(__name__)
+        # Set logger for all modules
 
     python_logger.info("=== Starting inference ===")
     if test_with_small_model:
@@ -155,11 +177,22 @@ def train(
 
     # Load model and datamodule
     python_logger.info(f"Loading {len(dataset_paths)} datasets from {dataset_paths}")
+
+    if llama_length:
+        length_args = {
+            "document_max_length": 1024 * 3,
+            "query_max_length": 1024,
+        }
+    else:
+        length_args = {}
+
     dataset = GPTDataset(
         dataset_paths=dataset_paths,
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_workers=num_workers,
+        kullm_template=kullm_template,
+        **length_args,
     )
 
     # model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
@@ -177,7 +210,7 @@ def train(
             device_map=device_map,
         )
 
-    fp = open("result.json", "w")
+    fp = open(prediction_path, "w", encoding="utf-8")
 
     model.eval()
     for batch in tqdm(dataset.predict_dataloader()):
@@ -197,7 +230,7 @@ def _main():
     python_logger.addHandler(RichHandler())
 
     args = _parse_args()
-    train(python_logger=python_logger, **vars(args))
+    predict(python_logger=python_logger, **vars(args))
 
 
 if __name__ == "__main__":

@@ -146,6 +146,7 @@ class PromptCollator:
             return_tensors="pt",
         )
 
-        del tokenized["token_type_ids"]
+        if "token_type_ids" in tokenized:
+            del tokenized["token_type_ids"]
 
         return tokenized
