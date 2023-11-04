@@ -6,6 +6,11 @@ from typing import Literal
 
 import torch
 import wandb
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    prepare_model_for_kbit_training,
+)
 from rich.logging import RichHandler
 from transformers import (
     Trainer,
@@ -80,10 +85,10 @@ def _parse_args() -> Namespace:
         help="Strategy for training (auto, ddp, ...)",
     )
     trainer.add_argument(
-        "--devices",
-        type=int,
-        default=1,
-        help="Number of devices to train on (1 for single GPU)",
+        "--device_map",
+        type=str,
+        default="auto",
+        help="Device map for model (auto, cpu, cuda:0, cuda:1, ...)",
     )
     trainer.add_argument(
         "--precision",
@@ -107,7 +112,7 @@ def _parse_args() -> Namespace:
     trainer.add_argument(
         "--early_stopping_patience",
         type=int,
-        default=5,
+        default=2,
         help="Early stopping patience (epochs)",
     )
     trainer.add_argument(
@@ -128,11 +133,30 @@ def _parse_args() -> Namespace:
         help="Whether to test with a small model (skt/kogpt2-base-v2). "
         "If True, model_path and tokenizer_path will be ignored",
     )
+    trainer.add_argument(
+        "--compile_model",
+        action="store_true",
+        help="Whether to compile model",
+    )
+
+    peft = parser.add_argument_group("peft", "Parameter-efficient fine-tuning arguments")
+    peft.add_argument("--load_in_8bit", action="store_true", help="Whether to load model in 8bit training mode")
+    peft.add_argument("--lora", action="store_true", help="Whether to use LoRA")
+    peft.add_argument("--lora_r", type=int, default=32, help="LoRA attention dimension")
+    peft.add_argument("--lora_alpha", type=int, default=64, help="Alpha for LoRA scaling")
+    peft.add_argument(
+        "--lora_target_modules",
+        type=str,
+        nargs="+",
+        default=["query_key_value"],
+        help="Target modules for LoRA",
+    )
+    peft.add_argument("--lora_dropout", type=float, default=0.05, help="Dropout for LoRA")
 
     logger = parser.add_argument_group("logger", "Logger arguments")
     logger.add_argument("--project_name", type=str, default="agc-GPT-Trainer", help="Project name. Used for logging")
     logger.add_argument("--use_wandb", action="store_true", help="Whether to use wandb")
-    logger.add_argument("--wandb_entity", type=str, default="kocohub", help="WandB entity name")
+    logger.add_argument("--wandb_entity", type=str, default=None, help="WandB entity name")
     logger.add_argument("--wandb_tags", type=str, nargs="+", default=None, help="WandB tags")
 
     parsed = parser.parse_args()
@@ -150,13 +174,12 @@ def train(
     model_path: str,
     tokenizer_path: str,
     seed: int,
-    accelerator: Literal["cpu", "cuda"],
     early_stopping_patience: int | None,
     strategy: None | Literal["ddp"],
     batch_size: int,
     num_workers: int,
     max_steps: int,
-    devices: int,
+    device_map: str,
     lr: float,
     model_max_length: int,
     eval_steps: int | float,
@@ -164,6 +187,12 @@ def train(
     precision: str,
     lr_scheduler_type: str,
     warmup_steps: int,
+    load_in_8bit: bool,
+    lora: bool,
+    lora_r: int,
+    lora_alpha: int,
+    lora_target_modules: list[str],
+    lora_dropout: float,
     *args,
     output_path: str = "output",
     use_fast_tokenizer: bool = False,
@@ -173,6 +202,7 @@ def train(
     wandb_tags: list[str] | None = None,
     python_logger: logging.Logger | None = None,
     test_with_small_model: bool = False,
+    compile_model: bool = False,
     **kwargs,
 ):
     """
@@ -183,13 +213,12 @@ def train(
         model_path: Path to Huggingface model
         tokenizer_path: Path to Huggingface tokenizer
         seed: Seed for random number generators
-        accelerator: Accelerator for training (cpu, cuda, ...)
         early_stopping_patience: Early stopping patience (epochs) (None for no early stopping)
         strategy: Strategy for training (auto, ddp, ...)
         batch_size: Batch size
         num_workers: Number of processes for dataloader
         max_steps: Max number of steps. -1 for no limit
-        devices: Number of devices to train on (1 for single GPU)
+        device_map: Device map for model
         lr: Learning rate
         model_max_length: Maximum length of the model input
         eval_steps: Validation check interval. If int, check every n steps.
@@ -198,6 +227,12 @@ def train(
         precision: Floating point precision (32, bf16, fp16)
         lr_scheduler_type: Learning rate scheduler type
         warmup_steps: Number of steps for warmup
+        load_in_8bit: Whether to load model in 8bit training mode
+        lora: Whether to use LoRA
+        lora_r: LoRA attention dimension
+        lora_alpha: Alpha for LoRA scaling
+        lora_target_modules: Target modules for LoRA
+        lora_dropout: Dropout for LoRA
         output_path: Base path to save model
         use_fast_tokenizer: Whether to use fast tokenizer (T5TokenizerFast) or Python tokenizer (T5Tokenizer)
         project_name: Project name. Used for logging
@@ -206,6 +241,7 @@ def train(
         wandb_tags: WandB tags
         python_logger: Logger to use
         test_with_small_model: Whether to test with a small model (skt/kogpt2-base-v2)
+        compile_model: Whether to compile model
         *args: Additional args
         **kwargs: Additional kwargs
 
@@ -267,9 +303,30 @@ def train(
         model = AutoModelForCausalLM.from_pretrained("skt/kogpt2-base-v2")
     else:
         python_logger.info(f"Loading model from {model_path}")
-        model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, device_map="auto")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path, device_map=device_map, load_in_8bit=load_in_8bit
+        )
+        if load_in_8bit:
+            python_logger.info("Loading model in 8bit training mode")
+            model = prepare_model_for_kbit_training(model)
+
+    if lora:
+        python_logger.info("Loading model to train with LoRA")
+        config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=lora_target_modules,
+            lora_dropout=lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, config)
+        model.config.use_cache = False
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    trainable_params, all_params = model.get_nb_trainable_parameters()
+    python_logger.info(f"Trainable parameters: {trainable_params:,} | All parameters: {all_params:,} | "
+                       f"Ratio: {trainable_params / all_params * 100}%")
     python_logger.info(f"Using optimizer {optimizer.__class__.__name__}")
 
     python_logger.info("Loading TrainingArguments and Trainer")
@@ -298,6 +355,7 @@ def train(
         dataloader_num_workers=num_workers,
         lr_scheduler_type=lr_scheduler_type,
         warmup_steps=warmup_steps,
+        torch_compile=compile_model,
     )
     python_logger.info(f"Using TrainingArguments {training_arguments}")
 
@@ -316,9 +374,8 @@ def train(
             "model_path": model_path,
             "tokenizer_path": tokenizer_path,
             "save_pretrained_path": output_dir.absolute(),
-            "accelerator": accelerator,
             "strategy": strategy,
-            "devices": devices,
+            "device_map": device_map,
             "seed": seed,
             "batch_size": batch_size,
             "num_workers": num_workers,

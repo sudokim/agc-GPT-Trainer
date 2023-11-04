@@ -1,4 +1,5 @@
 import json
+import warnings
 from logging import getLogger
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,7 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from src.utils import FineTuningCollator, PromptCollator
 
-logger = getLogger(__name__)
+logger = getLogger("Trainer")
 
 
 class GPTFineTuningDataset(Dataset):
@@ -112,6 +113,9 @@ class GPTDataset:
         num_workers: int = 4,
         prompt_template_input: str | None = None,
         prompt_template_target: str | None = None,
+        document_max_length: int = 1024 + 512,
+        query_max_length: int = 512,
+        kullm_template: bool = False,
     ):
         """
         DataModule for the DocT5QueryModule
@@ -126,6 +130,9 @@ class GPTDataset:
                 {question} and {document} placeholders. Defaults to None (use the default prompt).
             prompt_template_target: Prompt to use for the answer. The prompt should contain {answer} placeholder.
                 Defaults to None (use the default prompt).
+            document_max_length (int): Max length of questions + documents
+            query_max_length (int): Max length of labels
+            kullm_template (bool): Whether to use KULLM pre-trained template
         """
         super().__init__()
 
@@ -142,10 +149,39 @@ class GPTDataset:
         self.batch_size = batch_size
         self.num_workers = num_workers
 
-        if prompt_template_input is None:
-            prompt_template_input = "주어진 문서의 내용을 참고하여 질문에 답하시오.<|sep|>" "질문: {question}<|sep|>문서: {document}<|sep|>답변:"
-        if prompt_template_target is None:
-            prompt_template_target = " {answer}<|endoftext|>"
+        self._tokenizer_vocabs = set(self.tokenizer.get_vocab().keys())
+
+        if "<|sep|>" in self._tokenizer_vocabs:
+            self.tokenizer.sep_token = "<|sep|>"
+        elif self.tokenizer.sep_token is None:
+            warnings.warn(f"Tokenizer {self.tokenizer} does not have a sep_token. \\n\\n will be used instead.")
+            self.tokenizer.sep_token = "\\n\\n"
+        if self.tokenizer.eos_token is None:
+            warnings.warn(f"Tokenizer {self.tokenizer} does not have a eos_token. <|endoftext|> will be used instead.")
+            self.tokenizer.eos_token = "<|endoftext|>"
+
+        if kullm_template:
+            logger.info("Using KULLM template")
+            if prompt_template_input is not None or prompt_template_target is not None:
+                warnings.warn(
+                    "kullm_template is True, but prompt_template_input and prompt_template_target are not None. "
+                    "Ignoring the given templates and using the default templates."
+                )
+            prompt_template_input = (
+                "아래는 작업을 설명하는 명령어와 추가 컨텍스트를 제공하는 입력이 짝을 이루는 예제입니다. 요청을 적절히 완료하는 응답을 작성하세요."
+                "\n\n### 명령어:\n주어진 문서의 내용을 참고하여 질문에 답하시오."
+                "\n\n### 입력:\n질문: {question}\n\n문서:{document}"
+                "\n\n### 응답:\n"
+            )
+            prompt_template_target = " {answer}" + self.tokenizer.eos_token
+        else:
+            logger.info("Using original template")
+            if prompt_template_input is None:
+                prompt_template_input = self.tokenizer.sep_token.join(
+                    ["주어진 문서의 내용을 참고하여 질문에 답하시오.", "질문: {question}", "문서: {document}", "답변:"]
+                )
+            if prompt_template_target is None:
+                prompt_template_target = " {answer}" + self.tokenizer.eos_token
 
         if prompt_template_input.count("{question}") != 1:
             raise ValueError("prompt_input should contain one {question} placeholder")
@@ -162,12 +198,15 @@ class GPTDataset:
             tokenizer=self.tokenizer,
             prompt_template_input=self.prompt_template_input,
             prompt_template_output=self.prompt_template_target,
+            document_max_length=document_max_length,
+            query_max_length=query_max_length,
         )
 
         # Used for prediction dataset
         self.collator_without_labels = PromptCollator(
             tokenizer=self.tokenizer,
             prompt_template_input=self.prompt_template_input,
+            document_max_length=document_max_length,
         )
 
         self.train_dataset = GPTFineTuningDataset(
@@ -208,7 +247,7 @@ class GPTDataset:
                 final_id = docid + self.DOCID_PARAGRAPHID_DELIMITER + paragraph_id
                 assert final_id not in self.docid_to_doc, f"Duplicate doc id {final_id}"
 
-                self.docid_to_doc[final_id] = paragraph["text"]
+                self.docid_to_doc[final_id] = paragraph["text"].replace("\uf000", "").replace("\u200b", "").strip()
 
         # Load train/dev/test data
         for split, dataset in zip(["train", "dev", "test"], [self.train_dataset, self.dev_dataset, self.test_dataset]):
@@ -242,7 +281,11 @@ class GPTDataset:
                     f"Incorrect type for answer in {item} in {dataset_path / f'{split_}.json'}; "
                     f"expected str, got {type(item['answer'])}"
                 )
-            if not isinstance(item["document"], (str, list)):
+
+            if isinstance(item["document"], str):
+                # Document is directly given
+                item["document"] = item["document"].replace("\uf000", "").replace("\u200b", "").strip()
+            elif not isinstance(item["document"], list):
                 raise ValueError(
                     f"Incorrect type for document in {item} in {dataset_path / f'{split_}.json'}; "
                     f"expected str or list[str], got {type(item['document'])}"
