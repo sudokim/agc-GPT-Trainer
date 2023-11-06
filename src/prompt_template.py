@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
+from typing import Callable
 
 
 @dataclass
@@ -21,11 +22,15 @@ class PromptTemplate:
         The target of the prompt.
         Target must have the following field:
         - {answer}
+    document_map: Callable[list[str], str] | None
+        A function that maps a list of documents to a single document.
+        If None, the documents will be joined with "\n".
     """
 
     description: str
     input: str | list[str]
     target: str
+    document_map: Callable[[list[str]], str] | None = None
 
     def __post_init__(self):
         if isinstance(self.input, list):
@@ -44,6 +49,23 @@ class PromptTemplate:
             raise ValueError("Input must have {document} field.")
         if "{answer}" not in self.target:
             raise ValueError("Target must have {answer} field.")
+
+
+def _join_documents(documents: list[str]) -> str:
+    """
+    Join documents with "근거 n" where n is the index of the document.
+    Args:
+        documents (list[str]): A list of documents.
+
+    Returns:
+        str: A single document.
+    """
+
+    output = []
+    for i, document in enumerate(documents, start=1):
+        output.append(f"근거 {i}:\n{document}")
+
+    return "\n\n".join(output)
 
 
 kullm_zeroshot_qa = PromptTemplate(
@@ -75,6 +97,14 @@ default_qa = PromptTemplate(
 )
 
 
+default_qa_separate_documents = PromptTemplate(
+    description="Original template from Polyglot for QA, with separate documents.",
+    input=["주어진 문서의 내용을 참고하여 질문에 답하시오.", "질문:\n{question}", "문서:\n{document}", "답변:"],
+    target="\n{answer}",
+    document_map=_join_documents,
+)
+
+
 class Template(Enum):
     """
     An enum class for prompt templates.
@@ -83,10 +113,12 @@ class Template(Enum):
     KULLM_ZEROSHOT_QA = kullm_zeroshot_qa
     KULLM_TITLE_GENERATION = kullm_template_title_generation
     DEFAULT_QA = default_qa
+    DEFAULT_QA_SEPARATE_DOCUMENTS = default_qa_separate_documents
 
 
 TEMPLATE_MAP: dict[str, Template] = {
     "kullm_zeroshot_qa": Template.KULLM_ZEROSHOT_QA,
     "kullm_title_generation": Template.KULLM_TITLE_GENERATION,
     "default_qa": Template.DEFAULT_QA,
+    "default_qa_separate_documents": Template.DEFAULT_QA_SEPARATE_DOCUMENTS,
 }
