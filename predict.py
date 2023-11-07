@@ -1,10 +1,9 @@
 import json
 import logging
-import warnings
+import pprint
 from argparse import ArgumentParser, Namespace
 
 import torch
-from peft import PeftModel
 from rich.logging import RichHandler
 from tqdm import tqdm
 from transformers import (
@@ -13,6 +12,7 @@ from transformers import (
 )
 
 from src.datamodule import GPTDataset
+from src.prompt_template import TEMPLATE_MAP
 
 
 def _parse_args() -> Namespace:
@@ -25,13 +25,6 @@ def _parse_args() -> Namespace:
         type=str,
         required=True,
         help="Path to prediction file",
-    )
-    paths.add_argument(
-        "--dataset_paths",
-        type=str,
-        nargs="+",
-        required=True,
-        help="Path(s) to dataset directory",
     )
     paths.add_argument(
         "--model_path",
@@ -51,6 +44,21 @@ def _parse_args() -> Namespace:
         type=str,
         default=None,
         help="Path to adapter weights",
+    )
+
+    dataset = parser.add_argument_group("dataset", "Dataset arguments")
+    dataset.add_argument(
+        "--dataset_paths",
+        type=str,
+        nargs="+",
+        required=True,
+        help="Path(s) to dataset directory",
+    )
+    dataset.add_argument(
+        "--template",
+        type=str,
+        required=True,
+        help="Template to use for prompt generation. If None, template is auto-selected based on model name",
     )
 
     model = parser.add_argument_group("model", "Model arguments")
@@ -76,12 +84,6 @@ def _parse_args() -> Namespace:
         action="store_true",
         help="Allow more tokens for LLAMA",
     )
-    trainer.add_argument(
-        "--kullm_template",
-        action="store_true",
-        help="Use KULLM template",
-    )
-
     peft = parser.add_argument_group("peft", "Parameter-efficient fine-tuning arguments")
     peft.add_argument("--load_in_8bit", action="store_true", help="Whether to load model in 8bit training mode")
     peft.add_argument("--lora", action="store_true", help="Whether to use LoRA")
@@ -99,13 +101,16 @@ def generate(model, tokenizer, batch, skip_special_tokens: bool = True, **kwargs
     # Generate
     batch = batch.to(model.device)
 
-    generate_params = dict(
-        do_sample=True,
-        max_new_tokens=512,
-        temperature=0.5,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-    ) | kwargs
+    generate_params = (
+        dict(
+            do_sample=True,
+            max_new_tokens=512,
+            temperature=0.5,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        | kwargs
+    )
 
     output = model.generate(
         **batch,
@@ -127,6 +132,7 @@ def predict(
     tokenizer_path: str,  # HuggingFace tokenizer path
     lora: bool,
     adapter_weight_path: str | None,  # Path to adapter weights
+    template: str,
     device_map: str,
     batch_size: int,
     num_workers: int,
@@ -142,7 +148,7 @@ def predict(
     if lora and adapter_weight_path is None:
         raise ValueError("adapter_weight_path must be specified when using LoRA")
     if not lora and adapter_weight_path is not None:
-        warnings.warn("adapter_weight_path will be ignored when not using LoRA. Specify --lora to use LoRA.")
+        raise ValueError("adapter_weight_path must be None when not using LoRA")
 
     torch.set_float32_matmul_precision("high")
 
@@ -186,12 +192,16 @@ def predict(
     else:
         length_args = {}
 
+    try:
+        template = TEMPLATE_MAP[template]
+    except KeyError:
+        raise ValueError(f"Invalid template: {template}. Available templates are: \n{pprint.pformat(TEMPLATE_MAP)}")
     dataset = GPTDataset(
         dataset_paths=dataset_paths,
+        template=template,
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_workers=num_workers,
-        kullm_template=kullm_template,
         **length_args,
     )
 
@@ -204,11 +214,7 @@ def predict(
 
     if lora:
         python_logger.info("Loading LoRA adapter")
-        model = PeftModel.from_pretrained(
-            model,
-            adapter_weight_path,
-            device_map=device_map,
-        )
+        model.load_adapter(peft_model_id=adapter_weight_path, adapter_name=adapter_weight_path)
 
     fp = open(prediction_path, "w", encoding="utf-8")
 
