@@ -61,9 +61,7 @@ def _join_documents(documents: list[str]) -> str:
         str: A single document.
     """
 
-    output = []
-    for i, document in enumerate(documents, start=1):
-        output.append(f"근거 {i}:\n{document}")
+    output = [f"근거:\n{document}" for document in documents]
 
     return "\n\n".join(output)
 

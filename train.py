@@ -371,7 +371,7 @@ def train(
         model = AutoModelForCausalLM.from_pretrained(model_path, device_map=device_map, load_in_8bit=load_in_8bit)
         if load_in_8bit:
             python_logger.info("Loading model in 8bit training mode")
-            model = prepare_model_for_kbit_training(model)
+            model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
 
     if lora:
         python_logger.info("Loading model to train with LoRA")
