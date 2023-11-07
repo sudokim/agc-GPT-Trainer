@@ -56,6 +56,12 @@ def _parse_args() -> Namespace:
         default="output",
         help="Base path to save model",
     )
+    paths.add_argument(
+        "--random_word",
+        type=str,
+        default=None,
+        help="Random word to use for saving model. If None, a random word will be generated",
+    )
 
     dataset = parser.add_argument_group("dataset", "Dataset arguments")
     dataset.add_argument(
@@ -220,6 +226,7 @@ def train(
     python_logger: logging.Logger | None = None,
     test_with_small_model: bool = False,
     compile_model: bool = False,
+    random_word: str | None = None,
     **kwargs,
 ):
     """
@@ -261,6 +268,7 @@ def train(
         python_logger: Logger to use
         test_with_small_model: Whether to test with a small model (skt/kogpt2-base-v2)
         compile_model: Whether to compile model
+        random_word: Random word to use for saving model. If None, a random word will be generated
         *args: Additional args
         **kwargs: Additional kwargs
 
@@ -278,13 +286,17 @@ def train(
         python_logger.warning("Testing with a small model (skt/kogpt2-base-v2)")
 
     # Create a unique save path
-    random_word_generator = RandomWord()
-    while True:
-        # Repeat until there is no directory with the same name
-        random_word = random_word_generator.random_words(include_parts_of_speech=["nouns"])[0]
+    if random_word is None:
+        random_word_generator = RandomWord()
+        while True:
+            # Repeat until there is no directory with the same name
+            random_word = random_word_generator.random_words(include_parts_of_speech=["nouns"])[0]
+            output_dir = Path(output_path) / random_word
+            if not output_dir.exists():
+                break
+    else:
+        python_logger.info(f"Using argument-provided random word: {random_word}")
         output_dir = Path(output_path) / random_word
-        if not output_dir.exists():
-            break
     output_dir.mkdir(parents=True)
     python_logger.info(f"Model will be saved to {output_dir.absolute()}")
 

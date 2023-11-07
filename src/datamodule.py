@@ -147,22 +147,18 @@ class GPTDataset:
             self._process_data(dataset_path)
 
         # Setup template
-        self.prompt_template_input = template.value.input
-        self.prompt_template_target = template.value.target
-        if isinstance(self.prompt_template_input, list):
-            self.prompt_template_input = self.tokenizer.sep_token.join(self.prompt_template_input)
-        logger.info(f"Using template: {template.value}")
+        self.prompt_template = template.value
+        logger.info(f"Using template: {template}")
 
         self.collator_with_labels = FineTuningCollator(
             tokenizer=self.tokenizer,
-            prompt_template_input=self.prompt_template_input,
-            prompt_template_output=self.prompt_template_target,
+            prompt_template=self.prompt_template,
             document_max_length=document_max_length,
             query_max_length=query_max_length,
         )
         self.collator_without_labels = PromptCollator(
             tokenizer=self.tokenizer,
-            prompt_template_input=self.prompt_template_input,
+            prompt_template=self.prompt_template,
             document_max_length=document_max_length,
         )
 
