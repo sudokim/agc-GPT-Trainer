@@ -29,7 +29,9 @@ class FineTuningCollator:
         else:
             self.prompt_template_input = prompt_template.input
 
-        self.prompt_template_output = prompt_template.target
+        assert self.tokenizer.eos_token is not None, "Tokenizer must have an EOS token."
+
+        self.prompt_template_output = prompt_template.target + self.tokenizer.eos_token
         self.document_map = prompt_template.document_map
 
         self.document_max_length = document_max_length
