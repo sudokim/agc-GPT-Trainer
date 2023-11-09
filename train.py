@@ -10,6 +10,7 @@ from peft import (
     LoraConfig,
     get_peft_model,
     prepare_model_for_kbit_training,
+    PeftModel,
 )
 from rich.logging import RichHandler
 from transformers import (
@@ -22,6 +23,7 @@ from transformers import (
 from wonderwords import RandomWord
 
 from src.datamodule import GPTDataset
+from src.prompt_template import TEMPLATE_MAP
 
 
 def _parse_args() -> Namespace:
@@ -29,13 +31,6 @@ def _parse_args() -> Namespace:
 
     paths = parser.add_argument_group("paths", "Paths to data and model")
     # Multiple paths accepted
-    paths.add_argument(
-        "--dataset_paths",
-        type=str,
-        nargs="+",
-        required=True,
-        help="Path(s) to dataset directory",
-    )
     paths.add_argument(
         "--model_path",
         type=str,
@@ -50,10 +45,37 @@ def _parse_args() -> Namespace:
         "or Huggingface model name (t5-base)",
     )
     paths.add_argument(
+        "--lora_adapter_path",
+        type=str,
+        default=None,
+        help="Path to adapter weights. If provided, adapter will be loaded before training",
+    )
+    paths.add_argument(
         "--output_path",
         type=str,
         default="output",
         help="Base path to save model",
+    )
+    paths.add_argument(
+        "--random_word",
+        type=str,
+        default=None,
+        help="Random word to use for saving model. If None, a random word will be generated",
+    )
+
+    dataset = parser.add_argument_group("dataset", "Dataset arguments")
+    dataset.add_argument(
+        "--dataset_paths",
+        type=str,
+        nargs="+",
+        required=True,
+        help="Path(s) to dataset directory",
+    )
+    dataset.add_argument(
+        "--template",
+        type=str,
+        required=True,
+        help="Template to use for prompt generation. If None, template is auto-selected based on model name",
     )
 
     seeds = parser.add_argument_group("seeds", "Seeds for reproducibility")
@@ -168,11 +190,12 @@ def _parse_args() -> Namespace:
     return parsed
 
 
-# noinspection PyUnusedLocal
 def train(
     dataset_paths: list[str],
     model_path: str,
     tokenizer_path: str,
+    lora_adapter_path: str | None,
+    template: str,
     seed: int,
     early_stopping_patience: int | None,
     strategy: None | Literal["ddp"],
@@ -203,6 +226,7 @@ def train(
     python_logger: logging.Logger | None = None,
     test_with_small_model: bool = False,
     compile_model: bool = False,
+    random_word: str | None = None,
     **kwargs,
 ):
     """
@@ -212,6 +236,8 @@ def train(
         dataset_paths: Paths to dataset directories
         model_path: Path to Huggingface model
         tokenizer_path: Path to Huggingface tokenizer
+        lora_adapter_path: Path to adapter weights. If provided, adapter will be loaded before training
+        template: Template to use for prompt generation. If None, template is auto-selected based on model name
         seed: Seed for random number generators
         early_stopping_patience: Early stopping patience (epochs) (None for no early stopping)
         strategy: Strategy for training (auto, ddp, ...)
@@ -242,6 +268,7 @@ def train(
         python_logger: Logger to use
         test_with_small_model: Whether to test with a small model (skt/kogpt2-base-v2)
         compile_model: Whether to compile model
+        random_word: Random word to use for saving model. If None, a random word will be generated
         *args: Additional args
         **kwargs: Additional kwargs
 
@@ -259,15 +286,48 @@ def train(
         python_logger.warning("Testing with a small model (skt/kogpt2-base-v2)")
 
     # Create a unique save path
-    random_word_generator = RandomWord()
-    while True:
-        # Repeat until there is no directory with the same name
-        random_word = random_word_generator.random_words(include_parts_of_speech=["nouns"])[0]
+    if random_word is None:
+        random_word_generator = RandomWord()
+        while True:
+            # Repeat until there is no directory with the same name
+            random_word = random_word_generator.random_words(include_parts_of_speech=["nouns"])[0]
+            output_dir = Path(output_path) / random_word
+            if not output_dir.exists():
+                break
+    else:
+        python_logger.info(f"Using argument-provided random word: {random_word}")
         output_dir = Path(output_path) / random_word
-        if not output_dir.exists():
-            break
     output_dir.mkdir(parents=True)
     python_logger.info(f"Model will be saved to {output_dir.absolute()}")
+
+    python_logger.info("Loading WandB")
+    if use_wandb:
+        python_logger.info("WandB is enabled")
+    else:
+        python_logger.info("WandB is disabled")
+        os.environ["WANDB_MODE"] = "disabled"
+    wandb.init(
+        dir=output_dir,
+        project=project_name,
+        entity=wandb_entity,
+        tags=wandb_tags,
+        config={
+            "dataset_paths": dataset_paths,
+            "model_path": model_path,
+            "tokenizer_path": tokenizer_path,
+            "save_pretrained_path": output_dir.absolute(),
+            "strategy": strategy,
+            "device_map": device_map,
+            "seed": seed,
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "max_steps": max_steps,
+            "lr": lr,
+            "eval_steps": eval_steps,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "use_fast_tokenizer": use_fast_tokenizer,
+        },
+    )
 
     # Load tokenizer
     python_logger.info("Loading tokenizer")
@@ -291,8 +351,13 @@ def train(
 
     # Load model and datamodule
     python_logger.info(f"Loading {len(dataset_paths)} datasets from {dataset_paths}")
+    try:
+        template = TEMPLATE_MAP[template]
+    except KeyError:
+        raise ValueError(f"Invalid template: {template}")
     dataset = GPTDataset(
         dataset_paths=dataset_paths,
+        template=template,
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_workers=num_workers,
@@ -303,30 +368,36 @@ def train(
         model = AutoModelForCausalLM.from_pretrained("skt/kogpt2-base-v2")
     else:
         python_logger.info(f"Loading model from {model_path}")
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path, device_map=device_map, load_in_8bit=load_in_8bit
-        )
+        model = AutoModelForCausalLM.from_pretrained(model_path, device_map=device_map, load_in_8bit=load_in_8bit)
         if load_in_8bit:
             python_logger.info("Loading model in 8bit training mode")
-            model = prepare_model_for_kbit_training(model)
+            model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
 
     if lora:
         python_logger.info("Loading model to train with LoRA")
-        config = LoraConfig(
-            r=lora_r,
-            lora_alpha=lora_alpha,
-            target_modules=lora_target_modules,
-            lora_dropout=lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, config)
-        model.config.use_cache = False
+        if lora_adapter_path is None:
+            python_logger.info("Loading LoRA adapter from scratch")
+            config = LoraConfig(
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                target_modules=lora_target_modules,
+                lora_dropout=lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+            model = get_peft_model(model, config)
+            model.config.use_cache = False
+        else:
+            python_logger.info(f"Loading LoRA adapter from {lora_adapter_path}")
+            model = PeftModel.from_pretrained(model=model, model_id=lora_adapter_path, is_trainable=True)
+            model.config.use_cache = False
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     trainable_params, all_params = model.get_nb_trainable_parameters()
-    python_logger.info(f"Trainable parameters: {trainable_params:,} | All parameters: {all_params:,} | "
-                       f"Ratio: {trainable_params / all_params * 100}%")
+    python_logger.info(
+        f"Trainable parameters: {trainable_params:,} | All parameters: {all_params:,} | "
+        f"Ratio: {trainable_params / all_params * 100}%"
+    )
     python_logger.info(f"Using optimizer {optimizer.__class__.__name__}")
 
     python_logger.info("Loading TrainingArguments and Trainer")
@@ -358,34 +429,6 @@ def train(
         torch_compile=compile_model,
     )
     python_logger.info(f"Using TrainingArguments {training_arguments}")
-
-    if use_wandb:
-        python_logger.info("WandB is enabled")
-    else:
-        python_logger.info("WandB is disabled")
-        os.environ["WANDB_MODE"] = "disabled"
-    wandb.init(
-        dir=output_dir,
-        project=project_name,
-        entity=wandb_entity,
-        tags=wandb_tags,
-        config={
-            "dataset_paths": dataset_paths,
-            "model_path": model_path,
-            "tokenizer_path": tokenizer_path,
-            "save_pretrained_path": output_dir.absolute(),
-            "strategy": strategy,
-            "device_map": device_map,
-            "seed": seed,
-            "batch_size": batch_size,
-            "num_workers": num_workers,
-            "max_steps": max_steps,
-            "lr": lr,
-            "eval_steps": eval_steps,
-            "gradient_accumulation_steps": gradient_accumulation_steps,
-            "use_fast_tokenizer": use_fast_tokenizer,
-        },
-    )
 
     # Setup trainer
     trainer = Trainer(

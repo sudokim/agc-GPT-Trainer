@@ -221,3 +221,9 @@ cython_debug/
 .idea/
 
 .conda/
+
+data/
+!data/README.md
+logs/
+output/
+predictions/

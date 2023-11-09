@@ -1,13 +1,14 @@
 import torch
 from transformers import BatchEncoding
 
+from src.prompt_template import PromptTemplate
+
 
 class FineTuningCollator:
     def __init__(
         self,
         tokenizer,
-        prompt_template_input: str,
-        prompt_template_output: str,
+        prompt_template: PromptTemplate,
         document_max_length: int = 1024 + 512,
         query_max_length: int = 512,
         pad_to_multiple_of_8: bool = True,
@@ -17,16 +18,22 @@ class FineTuningCollator:
 
         Args:
             tokenizer: Tokenizer
-            prompt_template_input (str): Prompt to use for the question.
-                The prompt should contain {question} and {document} placeholders.
-            prompt_template_output (str): Prompt to use for the answer. The prompt should contain {answer} placeholder.
+            prompt_template: Template
             document_max_length (int): Max length of questions + documents
             query_max_length (int): Max length of labels
         """
-
         self.tokenizer = tokenizer
-        self.prompt_template_input = prompt_template_input
-        self.prompt_template_output = prompt_template_output
+
+        if isinstance(prompt_template.input, list):
+            self.prompt_template_input = self.tokenizer.sep_token.join(prompt_template.input)
+        else:
+            self.prompt_template_input = prompt_template.input
+
+        assert self.tokenizer.eos_token is not None, "Tokenizer must have an EOS token."
+
+        self.prompt_template_output = prompt_template.target + self.tokenizer.eos_token
+        self.document_map = prompt_template.document_map
+
         self.document_max_length = document_max_length
         self.query_max_length = query_max_length
         self.pad_to_multiple_of_8 = pad_to_multiple_of_8
@@ -52,12 +59,10 @@ class FineTuningCollator:
             docs_raw.append(doc)
             labels.append(label)
 
-        # !!! Temporarily join documents with \n
-        # TODO: Use a better way to join documents
         docs = []
         for doc in docs_raw:
             if isinstance(doc, list):
-                doc = "\n".join(doc)
+                doc = self.document_map(doc)
             docs.append(doc)
 
         prompt_input = [
@@ -72,7 +77,7 @@ class FineTuningCollator:
             prompt_input,
             padding=True,
             truncation=True,
-            max_length=self.document_max_length,
+            max_length=self.document_max_length + self.query_max_length,
             return_tensors="pt",
             pad_to_multiple_of=8 if self.pad_to_multiple_of_8 else None,
         )
@@ -92,7 +97,7 @@ class PromptCollator:
     def __init__(
         self,
         tokenizer,
-        prompt_template_input: str,
+        prompt_template: PromptTemplate,
         document_max_length: int = 1024 + 512,
     ):
         """
@@ -100,13 +105,20 @@ class PromptCollator:
 
         Args:
             tokenizer: Tokenizer
-            prompt_template_input (str): Prompt to use for the question.
-                The prompt should contain {question} and {document} placeholders.
+            prompt_template: Template
             document_max_length (int): Max length of questions + documents
         """
 
         self.tokenizer = tokenizer
-        self.prompt_template_input = prompt_template_input
+
+        if isinstance(prompt_template.input, list):
+            self.prompt_template_input = self.tokenizer.sep_token.join(prompt_template.input)
+        else:
+            self.prompt_template_input = prompt_template.input
+
+        assert self.tokenizer.eos_token is not None, "Tokenizer must have an EOS token."
+
+        self.document_map = prompt_template.document_map
         self.document_max_length = document_max_length
 
     def __call__(self, batch: list[list[str], list[list[str]]]) -> BatchEncoding:  # (questions, documents)
@@ -126,12 +138,10 @@ class PromptCollator:
             questions.append(question)
             docs_raw.append(doc)
 
-        # !!! Temporarily join documents with \n
-        # TODO: Use a better way to join documents
         docs = []
         for doc in docs_raw:
             if isinstance(doc, list):
-                doc = "\n".join(doc)
+                doc = self.document_map(doc)
             docs.append(doc)
 
         prompt_input = [

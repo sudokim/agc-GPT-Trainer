@@ -5,7 +5,13 @@ tokenizers~=0.14.1
 transformers~=4.34.1
 wandb~=0.15.12
 wonderwords~=2.2.0
+# Packages for PEFT training
 accelerate~=0.24.0
 peft~=0.5.0
 bitsandbytes~=0.41.1
 scipy~=1.11.3
+# Packages for evaluation
+KoBERTScore @ git+https://github.com/lovit/KoBERTScore@1e43653cc04641911467dddc89b26036f44a614d
+konlpy~=0.6.0
+rouge~=1.0.1
+
