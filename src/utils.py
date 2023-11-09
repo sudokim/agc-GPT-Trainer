@@ -110,7 +110,14 @@ class PromptCollator:
         """
 
         self.tokenizer = tokenizer
-        self.prompt_template_input = prompt_template.input
+
+        if isinstance(prompt_template.input, list):
+            self.prompt_template_input = self.tokenizer.sep_token.join(prompt_template.input)
+        else:
+            self.prompt_template_input = prompt_template.input
+
+        assert self.tokenizer.eos_token is not None, "Tokenizer must have an EOS token."
+
         self.document_map = prompt_template.document_map
         self.document_max_length = document_max_length
 
